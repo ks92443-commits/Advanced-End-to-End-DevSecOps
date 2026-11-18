@@ -1,40 +1,44 @@
 pipeline {
     agent any
+
     tools {
-        jdk 'jdk'
-        nodejs 'nodejs'
+        jdk 'jdk21'
+        nodejs 'nodejs-18'
     }
+
     environment {
-        SCANNER_HOME          = tool 'sonar-scanner'
-        AWS_DEFAULT_REGION    = 'us-east-1'
-        AWS_ACCESS_KEY_ID     = credentials('AWS_ACCESS_KEY_ID')
-        AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
-        AWS_ACCOUNT_ID        = credentials('ACCOUNT_ID')
-        ECR_REPO              = credentials('ECR_REPO1')
-        REGISTRY              = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-        REPOSITORY_URI        = "${REGISTRY}/${ECR_REPO}"
-        IMAGE_TAG             = "${BUILD_NUMBER}"
+        SCANNER_HOME       = tool 'sonar-scanner'
+        AWS_DEFAULT_REGION = 'us-east-1'
+        AWS_ACCOUNT_ID     = '605199372964'
+        ECR_REPO           = 'frontend'
+        REGISTRY           = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        REPOSITORY_URI     = "${REGISTRY}/${ECR_REPO}"
+        IMAGE_TAG          = "${BUILD_NUMBER}"
     }
+
     stages {
         stage('Cleanup Workspace') {
             steps { cleanWs() }
         }
+
         stage('Checkout from Git') {
             steps {
                 git branch: 'main',
-                    credentialsId: 'GITHUB',
+                    credentialsId: 'github-pat',
                     url: 'https://github.com/ks92443-commits/Advanced-End-to-End-DevSecOps.git'
             }
         }
+
         stage('SonarQube Analysis') {
             steps {
                 dir('Application-Code/frontend') {
-                    withSonarQubeEnv('sonar-server') {
-                        sh '$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectKey=frontend -Dsonar.projectName=frontend -Dsonar.sources=src'
+                    withSonarQubeEnv('sonarqube-server') {
+                        sh "${SCANNER_HOME}/bin/sonar-scanner -Dsonar.projectKey=frontend -Dsonar.projectName=frontend -Dsonar.sources=src"
                     }
                 }
             }
         }
+
         stage('Quality Gate') {
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
@@ -42,11 +46,13 @@ pipeline {
                 }
             }
         }
+
         stage('Trivy File Scan') {
             steps {
                 sh 'trivy fs --severity HIGH,CRITICAL Application-Code/frontend > trivy-fs-frontend.txt || true'
             }
         }
+
         stage('Docker Build') {
             steps {
                 dir('Application-Code/frontend') {
@@ -54,19 +60,26 @@ pipeline {
                 }
             }
         }
+
         stage('Trivy Image Scan') {
             steps {
                 sh 'trivy image --severity HIGH,CRITICAL ${ECR_REPO}:${IMAGE_TAG} > trivy-image-frontend.txt || true'
             }
         }
+
         stage('Push to ECR') {
             steps {
-                sh 'aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $REGISTRY'
-                sh 'docker tag ${ECR_REPO}:${IMAGE_TAG} ${REPOSITORY_URI}:${IMAGE_TAG}'
-                sh 'docker push ${REPOSITORY_URI}:${IMAGE_TAG}'
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
+                    sh '''
+                        aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $REGISTRY
+                        docker tag ${ECR_REPO}:${IMAGE_TAG} ${REPOSITORY_URI}:${IMAGE_TAG}
+                        docker push ${REPOSITORY_URI}:${IMAGE_TAG}
+                    '''
+                }
             }
         }
     }
+
     post {
         always {
             archiveArtifacts artifacts: 'trivy-*.txt', allowEmptyArchive: true
